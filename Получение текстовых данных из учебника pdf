@@ -1,0 +1,94 @@
+import fitz  #PyMuPDF
+import easyocr
+import concurrent.futures
+from PIL import Image
+import io
+import os
+import time
+import numpy as np
+
+#конфигурация
+PDF_PATH = r"C:\Users\PC\Desktop\Учебники английского 5 класс\angl_jazyk_-spotlight_-uchebnik_-5-kl_-vaulina_compressed_1.pdf" #input
+OUTPUT_TXT = os.path.join(os.path.dirname(PDF_PATH), "extracted_text_optimized.txt") #output
+LANGUAGES = ['en', 'ru']
+PREPROCESS_IMAGES = True  #улучшение качества изображений перед распознаванием
+USE_GPU = True  #для ускорения
+THREADS = 4  #количество потоков для обработки
+
+def preprocess_image(img):
+    #препроцессинг. улучшаем качество картинки для лучшего распознавания
+    img = np.array(img)
+    #контрастиование. взяла готовый код
+    img = img.astype(np.float32)
+    img = (img - img.min()) * (255 / (img.max() - img.min()))
+    img = img.astype(np.uint8)
+    return Image.fromarray(img)
+
+def process_page(args): 
+    page_num, doc, reader = args #обработка 1 страницы-картинки
+    try:
+        page = doc.load_page(page_num)
+        images = []
+        
+        #извлекаются изображения-страницы
+        for img_index, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            img_data = Image.open(io.BytesIO(base_image["image"]))
+            
+            if PREPROCESS_IMAGES:
+                img_data = preprocess_image(img_data)
+                
+            images.append((page_num, img_index, img_data))
+        
+        page_results = [] #распознаватель текста, кол-ва стр (картинок)
+        for page_num, img_index, img in images:
+            result = reader.readtext(np.array(img),
+                                  batch_size=10,
+                                  detail=0,
+                                  paragraph=True,
+                                  min_size=10,
+                                  contrast_ths=0.3)
+            page_results.append(f"\n=== Страница {page_num+1} ===\n" + "\n".join(result))
+            
+        return "\n".join(page_results)
+    
+    except Exception as e:
+        return f"\nОшибка на странице {page_num+1}: {str(e)}" #в случае ошибки запринтит
+
+def main():
+    start_time = time.time()
+    print("Инициализация EasyOCR...")
+    reader = easyocr.Reader(LANGUAGES,
+                          gpu=USE_GPU,
+                          model_storage_directory=None,
+                          download_enabled=False)
+    
+    doc = fitz.open(PDF_PATH) #открытие пд файла
+    total_pages = len(doc) #общее количество страниц
+    print(f"Начало обработки {total_pages} страниц...")
+    
+    #многопоточная обработка для ускорения работы кода
+    with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as executor:
+        futures = []
+        for page_num in range(total_pages):
+            futures.append(executor.submit(process_page, (page_num, doc, reader)))
+        
+        #сбор результатов. количество обраб страниц
+        results = []
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+            print(f"Обработано {len(results)}/{total_pages} страниц", end='\r')
+    
+    #сохр резалт
+    with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
+        f.write("\n".join(results))
+    
+    #общие сведения о ходе работы + директория сохранения
+    elapsed = time.time() - start_time
+    print(f"\nГотово! Время обработки: {elapsed//60} мин {elapsed%60:.2f} сек")
+    print(f"Средняя скорость: {total_pages/(elapsed/60):.1f} страниц/мин")
+    print(f"Результат сохранен в: {OUTPUT_TXT}")
+
+if __name__ == "__main__":
+    main()
